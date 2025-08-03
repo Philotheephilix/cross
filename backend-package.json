@@ -1,0 +1,20 @@
+{
+  "name": "cross-chain-swap-relayer",
+  "version": "1.0.0",
+  "description": "Cross-chain swap relayer service for Sepolia to Arbitrum Sepolia swaps",
+  "main": "backend-relayer.js",
+  "type": "module",
+  "scripts": {
+    "start": "node backend-relayer.js",
+    "dev": "node --watch backend-relayer.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.8.0"
+  },
+  "keywords": ["cross-chain", "swap", "relayer", "ethereum", "arbitrum"],
+  "author": "",
+  "license": "MIT"
+}

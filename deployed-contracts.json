@@ -1,0 +1,12 @@
+{
+  "sepolia": {
+    "escrowFactory": "0x707Bfe09631042C4fC5Dba6f17626A8Cb2341706",
+    "resolver": "0x124081fC8431ED71c5F8e0fD421e06FaD541B3B5",
+    "lastDeployed": "2025-08-03T12:01:37.567Z"
+  },
+  "arbitrumSepolia": {
+    "escrowFactory": "0x4678DB83fd35Fc8613Cd4969584dee9830c42430",
+    "resolver": "0x1Fb2DA7cCCcDC6E97768B1Fa68da94D6dcba2bB9",
+    "lastDeployed": "2025-08-03T12:01:11.347Z"
+  }
+}
