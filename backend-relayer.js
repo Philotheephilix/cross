@@ -21,9 +21,18 @@ const PORT = process.env.PORT || 3001
 app.use(cors())
 app.use(express.json())
 
-// Load contract artifacts
-const factoryContract = JSON.parse(readFileSync(join(__dirname, 'dist/contracts/EscrowFactory.sol/EscrowFactory.json'), 'utf8'))
-const resolverContractArtifact = JSON.parse(readFileSync(join(__dirname, 'dist/contracts/Resolver.sol/Resolver.json'), 'utf8'))
+// Load contract artifacts (same as arb-sep.js)
+let factoryContract, resolverContractArtifact
+
+try {
+    factoryContract = JSON.parse(readFileSync(join(__dirname, 'dist/contracts/EscrowFactory.sol/EscrowFactory.json'), 'utf8'))
+    resolverContractArtifact = JSON.parse(readFileSync(join(__dirname, 'dist/contracts/Resolver.sol/Resolver.json'), 'utf8'))
+    console.log('✅ Contract artifacts loaded successfully')
+} catch (error) {
+    console.error('❌ Failed to load contract artifacts:', error.message)
+    console.log('💡 Make sure to compile contracts first: forge build')
+    process.exit(1)
+}
 
 // ERC20 ABI for token interactions
 const ERC20_ABI = [
@@ -65,16 +74,20 @@ const srcRelayer = new ethers.Wallet(process.env.PRIVATE_KEY, srcProvider)
 const dstRelayer = new ethers.Wallet(process.env.PRIVATE_KEY, dstProvider)
 
 // Deploy contracts function
-async function deployContracts(provider, deployer, chainConfig) {
+async function deployContracts(provider, deployer, chainConfig, chainName) {
     try {
-        // Deploy EscrowFactory
+        // Use EscrowFactory for both chains (same as arb-sep.js)
+        const contractToUse = factoryContract
+        const factoryName = 'EscrowFactory'
+        
+        // Deploy EscrowFactory (same as arb-sep.js)
         const factoryFactory = new ethers.ContractFactory(
-            factoryContract.abi,
-            factoryContract.bytecode,
+            contractToUse.abi,
+            contractToUse.bytecode,
             deployer
         )
         
-        console.log('   Deploying EscrowFactory...')
+        console.log(`   Deploying ${factoryName}...`)
         const escrowFactory = await factoryFactory.deploy(
             chainConfig.limitOrderProtocol,
             chainConfig.tokens.USDC.address,
@@ -84,7 +97,7 @@ async function deployContracts(provider, deployer, chainConfig) {
             3600  // rescueDelayDst
         )
         await escrowFactory.waitForDeployment()
-        console.log(`   EscrowFactory deployed: ${await escrowFactory.getAddress()}`)
+        console.log(`   ${factoryName} deployed: ${await escrowFactory.getAddress()}`)
 
         // Deploy Resolver
         const resolverFactory = new ethers.ContractFactory(
@@ -119,6 +132,22 @@ app.get('/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() })
 })
 
+// Get deployed contract addresses
+app.get('/api/contracts', (req, res) => {
+    if (!deployedContracts) {
+        return res.status(503).json({
+            success: false,
+            error: 'Contracts not yet deployed'
+        })
+    }
+    
+    res.json({
+        success: true,
+        contracts: deployedContracts,
+        relayerAddress: srcRelayer.address // Add relayer address for frontend approval
+    })
+})
+
 // Deploy factory contracts
 app.post('/api/deploy-factories', async (req, res) => {
     try {
@@ -126,11 +155,11 @@ app.post('/api/deploy-factories', async (req, res) => {
 
         // Deploy on source chain (Sepolia)
         console.log('Deploying on Sepolia (source)...')
-        const srcDeployed = await deployContracts(srcProvider, srcRelayer, config.chain.source)
+                    const srcDeployed = await deployContracts(srcProvider, srcRelayer, config.chain.source, 'Sepolia')
         
         // Deploy on destination chain (Arbitrum Sepolia)
         console.log('Deploying on Arbitrum Sepolia (destination)...')
-        const dstDeployed = await deployContracts(dstProvider, dstRelayer, config.chain.destination)
+        const dstDeployed = await deployContracts(dstProvider, dstRelayer, config.chain.destination, 'Arbitrum Sepolia')
 
         const deploymentInfo = {
             sepolia: {
@@ -235,22 +264,6 @@ app.post('/api/create-order', async (req, res) => {
             timelocks: timelocksWithDeployedAt
         }
 
-        // Store swap data
-        const swapId = orderHash
-        activeSwaps.set(swapId, {
-            orderHash,
-            secret,
-            hashlock,
-            amount: swapAmount,
-            userAddress,
-            srcImmutables,
-            dstImmutables,
-            srcFactoryAddress,
-            dstFactoryAddress,
-            status: 'created',
-            createdAt: new Date().toISOString()
-        })
-
         // Create typed data for message signing
         const typedData = {
             types: {
@@ -289,6 +302,23 @@ app.post('/api/create-order', async (req, res) => {
                 nonce: Math.floor(Math.random() * 1000000).toString()
             }
         }
+
+        // Store swap data
+        const swapId = orderHash
+        activeSwaps.set(swapId, {
+            orderHash,
+            secret,
+            hashlock,
+            amount: swapAmount,
+            userAddress,
+            srcImmutables,
+            dstImmutables,
+            srcFactoryAddress,
+            dstFactoryAddress,
+            status: 'created',
+            createdAt: new Date().toISOString(),
+            typedData: typedData // Store the original typed data for verification
+        })
 
         res.json({
             success: true,
@@ -334,48 +364,13 @@ app.post('/api/submit-signed-message', async (req, res) => {
 
         // Verify the signature
         try {
-            const typedData = {
-                types: {
-                    EIP712Domain: [
-                        { name: 'name', type: 'string' },
-                        { name: 'version', type: 'string' },
-                        { name: 'chainId', type: 'uint256' },
-                        { name: 'verifyingContract', type: 'address' }
-                    ],
-                    CrossChainSwapOrder: [
-                        { name: 'userAddress', type: 'address' },
-                        { name: 'amount', type: 'uint256' },
-                        { name: 'srcFactoryAddress', type: 'address' },
-                        { name: 'dstFactoryAddress', type: 'address' },
-                        { name: 'hashlock', type: 'bytes32' },
-                        { name: 'orderHash', type: 'bytes32' },
-                        { name: 'timestamp', type: 'uint256' },
-                        { name: 'nonce', type: 'uint256' }
-                    ]
-                },
-                primaryType: 'CrossChainSwapOrder',
-                domain: {
-                    name: 'Cross-Chain Swap Order',
-                    version: '1',
-                    chainId: config.chain.source.chainId,
-                    verifyingContract: swapData.srcFactoryAddress
-                },
-                message: {
-                    userAddress: swapData.userAddress,
-                    amount: swapData.amount.toString(),
-                    srcFactoryAddress: swapData.srcFactoryAddress,
-                    dstFactoryAddress: swapData.dstFactoryAddress,
-                    hashlock: swapData.hashlock,
-                    orderHash: swapData.orderHash,
-                    timestamp: Math.floor(Date.now() / 1000).toString(),
-                    nonce: Math.floor(Math.random() * 1000000).toString()
-                }
-            }
+            // Use the original typed data that was sent to the frontend
+            const originalTypedData = swapData.typedData
 
             const recoveredAddress = ethers.verifyTypedData(
-                typedData.domain,
-                { CrossChainSwapOrder: typedData.types.CrossChainSwapOrder },
-                typedData.message,
+                originalTypedData.domain,
+                { CrossChainSwapOrder: originalTypedData.types.CrossChainSwapOrder },
+                originalTypedData.message,
                 signature
             )
 
@@ -444,66 +439,212 @@ app.get('/api/swap-status/:swapId', (req, res) => {
     })
 })
 
-// Async swap execution function
+// Async swap execution function - Based on proven arb-sep.js logic
 async function executeSwapAsync(swapData) {
     try {
         console.log(`🔄 Executing swap for ${swapData.userAddress}...`)
 
-        // Setup contracts
-        const srcFactory = new ethers.Contract(swapData.srcFactoryAddress, ESCROW_FACTORY_ABI, srcRelayer)
-        const dstFactory = new ethers.Contract(swapData.dstFactoryAddress, ESCROW_FACTORY_ABI, dstRelayer)
+        // Setup contracts using the same approach as arb-sep.js (EscrowFactory for both chains)
+        const srcFactoryContract = new ethers.Contract(swapData.srcFactoryAddress, factoryContract.abi, srcRelayer)
+        const dstFactoryContract = new ethers.Contract(swapData.dstFactoryAddress, factoryContract.abi, dstRelayer)
         const srcToken = new ethers.Contract(config.chain.source.tokens.USDC.address, ERC20_ABI, srcRelayer)
         const dstToken = new ethers.Contract(config.chain.destination.tokens.USDC.address, ERC20_ABI, dstRelayer)
 
-        // Step 1: Approve tokens on destination chain (relayer)
-        console.log('   Relayer: Approving USDC on destination chain...')
+        // Step 1: Relayer approves USDC on destination chain (adapted from arb-sep.js)
+        console.log('   Relayer: Approving USDC spending on destination chain...')
         swapData.status = 'approving_dst'
         activeSwaps.set(swapData.orderHash, swapData)
-
-        const dstBalance = await dstToken.balanceOf(dstRelayer.address)
-        if (dstBalance < swapData.amount) {
-            throw new Error(`Insufficient relayer balance on destination chain: ${ethers.formatUnits(dstBalance, 6)} USDC`)
-        }
-
-        const dstApprovalTx = await dstToken.approve(swapData.dstFactoryAddress, swapData.amount)
-        await dstApprovalTx.wait()
-        console.log('   ✅ Relayer approved USDC on destination chain')
-
-        // Step 2: Create destination escrow
-        console.log('   Relayer: Creating destination escrow...')
-        swapData.status = 'creating_dst_escrow'
-        activeSwaps.set(swapData.orderHash, swapData)
-
-        const srcCancellationTimestamp = Math.floor(Date.now() / 1000) + 3600
-        const createDstEscrowTx = await dstFactory.createDstEscrow(
-            swapData.dstImmutables,
-            srcCancellationTimestamp,
-            { value: swapData.dstImmutables.safetyDeposit }
-        )
-        const dstReceipt = await createDstEscrowTx.wait()
-
-        // Get destination escrow address from events
-        let dstEscrowAddress = null
-        for (const log of dstReceipt.logs) {
-            try {
-                const parsed = dstFactory.interface.parseLog(log)
-                if (parsed.name === 'DstEscrowCreated') {
-                    dstEscrowAddress = parsed.args.escrow
-                    break
+        
+        try {
+            // Check current allowance first
+            const currentAllowance = await dstToken.allowance(dstRelayer.address, swapData.dstFactoryAddress)
+            console.log(`   Current allowance: ${ethers.formatUnits(currentAllowance, 6)} USDC`)
+            
+            if (currentAllowance < swapData.amount) {
+                // Check balance before approval
+                const dstBalance = await dstToken.balanceOf(dstRelayer.address)
+                console.log(`   Relayer destination USDC balance: ${ethers.formatUnits(dstBalance, 6)}`)
+                
+                if (dstBalance < swapData.amount) {
+                    throw new Error(`Insufficient relayer balance on destination chain: ${ethers.formatUnits(dstBalance, 6)} USDC`)
                 }
-            } catch (e) {
-                // Ignore parsing errors
+                
+                // Estimate gas for approval
+                const gasEstimate = await dstToken.approve.estimateGas(swapData.dstFactoryAddress, swapData.amount)
+                console.log(`   Estimated gas for approval: ${gasEstimate.toString()}`)
+                
+                const approveDstTx = await dstToken.approve(swapData.dstFactoryAddress, swapData.amount, {
+                    gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
+                })
+                console.log(`   Approval transaction hash: ${approveDstTx.hash}`)
+                await approveDstTx.wait()
+                console.log('   ✅ Relayer approved USDC on destination chain')
+            } else {
+                console.log('   ✅ USDC already approved on destination chain')
+            }
+        } catch (error) {
+            console.log(`   ❌ Destination chain approval failed: ${error.message}`)
+            console.log('   💡 Trying with higher gas limit...')
+            
+            try {
+                const approveDstTx = await dstToken.approve(swapData.dstFactoryAddress, swapData.amount, {
+                    gasLimit: 100000n // Use higher gas limit
+                })
+                await approveDstTx.wait()
+                console.log('   ✅ Relayer approved USDC on destination chain (with higher gas)')
+            } catch (retryError) {
+                console.log(`   ❌ Approval retry failed: ${retryError.message}`)
+                throw new Error(`Failed to approve USDC on destination chain: ${retryError.message}`)
             }
         }
 
-        if (!dstEscrowAddress) {
-            throw new Error('Could not find destination escrow address')
+        // Step 2: Relayer creates destination escrow (adapted from arb-sep.js)
+        console.log('   Relayer: Creating destination escrow with taker tokens...')
+        swapData.status = 'creating_dst_escrow'
+        activeSwaps.set(swapData.orderHash, swapData)
+        
+        let dstEscrowAddress
+        try {
+            // Check balance before creating escrow
+            const dstBalance = await dstToken.balanceOf(dstRelayer.address)
+            console.log(`   Relayer destination USDC balance: ${ethers.formatUnits(dstBalance, 6)}`)
+            
+            if (dstBalance < swapData.amount) {
+                throw new Error(`Insufficient USDC balance for destination escrow: ${ethers.formatUnits(dstBalance, 6)} USDC`)
+            }
+            
+            const srcCancellationTimestamp = Math.floor(Date.now() / 1000) + 3600 // 1 hour from now
+            
+            // Debug: Log the dstImmutables structure
+            console.log('   Debug - dstImmutables structure:')
+            console.log(`     orderHash: ${swapData.dstImmutables.orderHash}`)
+            console.log(`     hashlock: ${swapData.dstImmutables.hashlock}`)
+            console.log(`     maker: ${swapData.dstImmutables.maker}`)
+            console.log(`     taker: ${swapData.dstImmutables.taker}`)
+            console.log(`     token: ${swapData.dstImmutables.token}`)
+            console.log(`     amount: ${swapData.dstImmutables.amount}`)
+            console.log(`     safetyDeposit: ${swapData.dstImmutables.safetyDeposit}`)
+            console.log(`     timelocks: ${swapData.dstImmutables.timelocks}`)
+            console.log(`     srcCancellationTimestamp: ${srcCancellationTimestamp}`)
+            console.log(`     safetyDeposit value being sent: ${swapData.dstImmutables.safetyDeposit}`)
+            
+            // Estimate gas for createDstEscrow
+            const gasEstimate = await dstFactoryContract.createDstEscrow.estimateGas(
+                swapData.dstImmutables,
+                srcCancellationTimestamp,
+                { value: swapData.dstImmutables.safetyDeposit }
+            )
+            console.log(`   Estimated gas for createDstEscrow: ${gasEstimate.toString()}`)
+            
+            const createDstEscrowTx = await dstFactoryContract.createDstEscrow(
+                swapData.dstImmutables,
+                srcCancellationTimestamp,
+                { 
+                    value: swapData.dstImmutables.safetyDeposit,
+                    gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
+                }
+            )
+            console.log(`   CreateDstEscrow transaction hash: ${createDstEscrowTx.hash}`)
+            await createDstEscrowTx.wait()
+                                                                                                                                                        
+            // Get the deployed escrow address from the transaction receipt
+            const receipt = await dstProvider.getTransactionReceipt(createDstEscrowTx.hash)
+            console.log(`   Transaction receipt logs count: ${receipt.logs.length}`)
+            
+            // Find the DstEscrowCreated event to get the escrow address
+            dstEscrowAddress = null
+            for (const log of receipt.logs) {
+                try {
+                    const parsed = dstFactoryContract.interface.parseLog(log)
+                    console.log(`   Found event: ${parsed.name}`)
+                    
+                    if (parsed.name === 'DstEscrowCreated') {
+                        dstEscrowAddress = parsed.args.escrow
+                        console.log(`   ✅ Found DstEscrowCreated event with escrow: ${dstEscrowAddress}`)
+                        break
+                    }
+                } catch (e) {
+                    console.log(`   Could not parse log: ${e.message}`)
+                    console.log(`   Log topics: ${log.topics.join(', ')}`)
+                }
+            }
+            
+            if (!dstEscrowAddress) {
+                // CRITICAL: We need the actual deployed address, not deterministic
+                console.log(`   ❌ CRITICAL ERROR: Could not find destination escrow address in logs!`)
+                console.log(`   Available events in logs:`)
+                for (const log of receipt.logs) {
+                    console.log(`     - Topics: ${log.topics.join(', ')}`)
+                    console.log(`     - Data: ${log.data}`)
+                }
+                throw new Error('Failed to get deployed destination escrow address from transaction logs')
+            }
+            
+            swapData.dstEscrowAddress = dstEscrowAddress
+            console.log(`   ✅ Relayer created destination escrow with ${ethers.formatUnits(swapData.amount, 6)} USDC`)
+            
+            // Note: createDstEscrow already handles the USDC transfer to the escrow
+        } catch (error) {
+            console.log(`   ❌ Destination escrow creation failed: ${error.message}`)
+            console.log('   💡 Trying with higher gas limit...')
+            
+            try {
+                const srcCancellationTimestamp = Math.floor(Date.now() / 1000) + 3600
+                const createDstEscrowTx = await dstFactoryContract.createDstEscrow(
+                    swapData.dstImmutables,
+                    srcCancellationTimestamp,
+                    { 
+                        value: swapData.dstImmutables.safetyDeposit,
+                        gasLimit: 300000n // Use higher gas limit
+                    }
+                )
+                await createDstEscrowTx.wait()
+                
+                // Get the deployed escrow address from the transaction receipt
+                const receipt = await dstProvider.getTransactionReceipt(createDstEscrowTx.hash)
+                console.log(`   Transaction receipt logs count: ${receipt.logs.length}`)
+                
+                // Find the DstEscrowCreated event to get the escrow address
+                dstEscrowAddress = null
+                for (const log of receipt.logs) {
+                    try {
+                        const parsed = dstFactoryContract.interface.parseLog(log)
+                        console.log(`   Found event: ${parsed.name}`)
+                        
+                        if (parsed.name === 'DstEscrowCreated') {
+                            dstEscrowAddress = parsed.args.escrow
+                            console.log(`   ✅ Found DstEscrowCreated event with escrow: ${dstEscrowAddress}`)
+                            break
+                        }
+                    } catch (e) {
+                        console.log(`   Could not parse log: ${e.message}`)
+                        console.log(`   Log topics: ${log.topics.join(', ')}`)
+                    }
+                }
+                
+                if (!dstEscrowAddress) {
+                    // CRITICAL: We need the actual deployed address, not deterministic
+                    console.log(`   ❌ CRITICAL ERROR: Could not find destination escrow address in logs!`)
+                    console.log(`   Available events in logs:`)
+                    for (const log of receipt.logs) {
+                        console.log(`     - Topics: ${log.topics.join(', ')}`)
+                        console.log(`     - Data: ${log.data}`)
+                    }
+                    throw new Error('Failed to get deployed destination escrow address from transaction logs')
+                }
+                
+                swapData.dstEscrowAddress = dstEscrowAddress
+                console.log(`   ✅ Relayer created destination escrow: ${dstEscrowAddress} (with higher gas)`)
+                console.log(`   ✅ Relayer created destination escrow with ${ethers.formatUnits(swapData.amount, 6)} USDC (with higher gas)`)
+                
+                // Note: createDstEscrow already handles the USDC transfer to the escrow
+            } catch (retryError) {
+                console.log(`   ❌ CreateDstEscrow retry failed: ${retryError.message}`)
+                throw new Error(`Failed to create destination escrow: ${retryError.message}`)
+            }
         }
 
-        swapData.dstEscrowAddress = dstEscrowAddress
-        console.log(`   ✅ Destination escrow created: ${dstEscrowAddress}`)
-
-        // Step 3: Wait for user approval and create source escrow
+        // Step 3: Wait for user approval on source chain (USER APPROVES FROM WALLET)
         console.log('   Waiting for user approval on source chain...')
         swapData.status = 'waiting_src_approval'
         activeSwaps.set(swapData.orderHash, swapData)
@@ -515,7 +656,7 @@ async function executeSwapAsync(swapData) {
 
         while (!approved && attempts < maxAttempts) {
             try {
-                const allowance = await srcToken.allowance(swapData.userAddress, swapData.srcFactoryAddress)
+                const allowance = await srcToken.allowance(swapData.userAddress, srcRelayer.address)
                 if (allowance >= swapData.amount) {
                     approved = true
                     console.log('   ✅ User approval detected')
@@ -530,73 +671,354 @@ async function executeSwapAsync(swapData) {
         }
 
         if (!approved) {
-            throw new Error('User approval timeout')
+            throw new Error('User approval timeout - user must approve USDC spending')
         }
 
-        // Step 4: Create source escrow (after approval detected)
-        console.log('   Relayer: Creating source escrow...')
-        swapData.status = 'creating_src_escrow'
+        // Step 4: Transfer USDC from user to relayer, then create source escrow
+        console.log('   Relayer: Transferring USDC from user to relayer...')
+        swapData.status = 'transferring_usdc'
         activeSwaps.set(swapData.orderHash, swapData)
 
-        const createSrcEscrowTx = await srcFactory.createSrcEscrow(
-            swapData.srcImmutables,
-            { value: swapData.srcImmutables.safetyDeposit }
-        )
-        const srcReceipt = await createSrcEscrowTx.wait()
+        // Transfer USDC from user to relayer first
+        try {
+            const transferTx = await srcToken.transferFrom(swapData.userAddress, srcRelayer.address, swapData.amount)
+            await transferTx.wait()
+            console.log('   ✅ USDC transferred from user to relayer')
+        } catch (error) {
+            console.log(`   ❌ USDC transfer failed: ${error.message}`)
+            throw new Error(`Failed to transfer USDC from user: ${error.message}`)
+        }
 
-        // Get source escrow address from events
-        let srcEscrowAddress = null
-        for (const log of srcReceipt.logs) {
+        // Relayer approves USDC spending on source chain (adapted from arb-sep.js)
+        console.log('   Relayer: Approving USDC spending on source chain...')
+        try {
+            // Check current allowance first
+            const currentAllowance = await srcToken.allowance(srcRelayer.address, swapData.srcFactoryAddress)
+            console.log(`   Current allowance: ${ethers.formatUnits(currentAllowance, 6)} USDC`)
+            
+            if (currentAllowance < swapData.amount) {
+                // Estimate gas for approval
+                const gasEstimate = await srcToken.approve.estimateGas(swapData.srcFactoryAddress, swapData.amount)
+                console.log(`   Estimated gas for approval: ${gasEstimate.toString()}`)
+                
+                const approveSrcTx = await srcToken.approve(swapData.srcFactoryAddress, swapData.amount, {
+                    gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
+                })
+                console.log(`   Approval transaction hash: ${approveSrcTx.hash}`)
+                await approveSrcTx.wait()
+                console.log('   ✅ Relayer approved USDC on source chain')
+            } else {
+                console.log('   ✅ USDC already approved on source chain')
+            }
+        } catch (error) {
+            console.log(`   ❌ Source chain approval failed: ${error.message}`)
+            console.log('   💡 Trying with higher gas limit...')
+            
             try {
-                const parsed = srcFactory.interface.parseLog(log)
-                if (parsed.name === 'SrcEscrowCreatedDirect') {
-                    srcEscrowAddress = parsed.args.escrow
-                    break
-                } else if (parsed.name === 'SrcEscrowCreated') {
-                    srcEscrowAddress = await srcFactory.addressOfEscrowSrc(swapData.srcImmutables)
-                    break
-                }
-            } catch (e) {
-                // Ignore parsing errors
+                const approveSrcTx = await srcToken.approve(swapData.srcFactoryAddress, swapData.amount, {
+                    gasLimit: 100000n // Use higher gas limit
+                })
+                await approveSrcTx.wait()
+                console.log('   ✅ Relayer approved USDC on source chain (with higher gas)')
+            } catch (retryError) {
+                console.log(`   ❌ Approval retry failed: ${retryError.message}`)
+                throw new Error(`Failed to approve USDC on source chain: ${retryError.message}`)
             }
         }
 
-        if (!srcEscrowAddress) {
-            throw new Error('Could not find source escrow address')
+        // Step 5: Create source escrow (adapted from arb-sep.js logic)
+        console.log('   Relayer: Creating source escrow...')
+        swapData.status = 'creating_src_escrow'
+        activeSwaps.set(swapData.orderHash, swapData)
+        
+        // Debug: Log the srcImmutables structure
+        console.log('   Debug - srcImmutables structure:')
+        console.log(`     orderHash: ${swapData.srcImmutables.orderHash}`)
+        console.log(`     hashlock: ${swapData.srcImmutables.hashlock}`)
+        console.log(`     maker: ${swapData.srcImmutables.maker}`)
+        console.log(`     taker: ${swapData.srcImmutables.taker}`)
+        console.log(`     token: ${swapData.srcImmutables.token}`)
+        console.log(`     amount: ${swapData.srcImmutables.amount}`)
+        console.log(`     safetyDeposit: ${swapData.srcImmutables.safetyDeposit}`)
+        console.log(`     timelocks: ${swapData.srcImmutables.timelocks}`)
+        console.log(`     safetyDeposit value being sent: ${swapData.srcImmutables.safetyDeposit}`)
+        
+        let srcEscrowAddress
+        try {
+            // Estimate gas for createSrcEscrow (same as arb-sep.js)
+            const gasEstimate = await srcFactoryContract.createSrcEscrow.estimateGas(
+                swapData.srcImmutables,
+                { value: swapData.srcImmutables.safetyDeposit }
+            )
+            console.log(`   Estimated gas for createSrcEscrow: ${gasEstimate.toString()}`)
+            
+            const createSrcEscrowTx = await srcFactoryContract.createSrcEscrow(
+                swapData.srcImmutables,
+                { 
+                    value: swapData.srcImmutables.safetyDeposit,
+                    gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
+                }
+            )
+            console.log(`   CreateSrcEscrow transaction hash: ${createSrcEscrowTx.hash}`)
+            await createSrcEscrowTx.wait()
+            
+            // Get the deployed escrow address from the transaction receipt (same as arb-sep.js)
+            const receipt = await srcProvider.getTransactionReceipt(createSrcEscrowTx.hash)
+            console.log(`   Transaction receipt logs count: ${receipt.logs.length}`)
+            
+            // Find the escrow creation event to get the escrow address (same as arb-sep.js)
+            srcEscrowAddress = null
+            for (const log of receipt.logs) {
+                try {
+                    const parsed = srcFactoryContract.interface.parseLog(log)
+                    console.log(`   Found event: ${parsed.name}`)
+                    
+                    // Check for SrcEscrowCreatedDirect event which contains the escrow address directly
+                    if (parsed.name === 'SrcEscrowCreatedDirect') {
+                        srcEscrowAddress = parsed.args.escrow
+                        console.log(`   ✅ Found SrcEscrowCreatedDirect event with escrow: ${srcEscrowAddress}`)
+                        break
+                    }
+                    // Check for SrcEscrowCreated event (contains full immutables)
+                    else if (parsed.name === 'SrcEscrowCreated') {
+                        console.log(`   Found SrcEscrowCreated event`)
+                        // For this event, we need to compute the escrow address deterministically
+                        const srcImmutablesForAddress = {
+                            orderHash: parsed.args.srcImmutables.orderHash,
+                            hashlock: parsed.args.srcImmutables.hashlock,
+                            maker: parsed.args.srcImmutables.maker,
+                            taker: parsed.args.srcImmutables.taker,
+                            token: parsed.args.srcImmutables.token,
+                            amount: parsed.args.srcImmutables.amount,
+                            safetyDeposit: parsed.args.srcImmutables.safetyDeposit,
+                            timelocks: parsed.args.srcImmutables.timelocks
+                        }
+                        srcEscrowAddress = await srcFactoryContract.addressOfEscrowSrc(srcImmutablesForAddress)
+                        console.log(`   ✅ Computed escrow address from SrcEscrowCreated: ${srcEscrowAddress}`)
+                        break
+                    }
+                } catch (e) {
+                    console.log(`   Could not parse log: ${e.message}`)
+                    console.log(`   Log topics: ${log.topics.join(', ')}`)
+                }
+            }
+            
+            if (!srcEscrowAddress) {
+                // CRITICAL: We need the actual deployed address, not deterministic
+                console.log(`   ❌ CRITICAL ERROR: Could not find escrow address in logs!`)
+                console.log(`   Available events in logs:`)
+                for (const log of receipt.logs) {
+                    console.log(`     - Topics: ${log.topics.join(', ')}`)
+                    console.log(`     - Data: ${log.data}`)
+                }
+                throw new Error('Failed to get deployed source escrow address from transaction logs')
+            }
+            
+            swapData.srcEscrowAddress = srcEscrowAddress
+            console.log(`   ✅ Source escrow created: ${srcEscrowAddress}`)
+        } catch (error) {
+            console.log(`   ❌ Source escrow creation failed: ${error.message}`)
+            console.log('   💡 Trying with higher gas limit...')
+            
+            try {
+                const createSrcEscrowTx = await srcFactoryContract.createSrcEscrow(
+                    swapData.srcImmutables,
+                    { 
+                        value: swapData.srcImmutables.safetyDeposit,
+                        gasLimit: 300000n // Use higher gas limit
+                    }
+                )
+                await createSrcEscrowTx.wait()
+                
+                // Get the deployed escrow address from the transaction receipt
+                const receipt = await srcProvider.getTransactionReceipt(createSrcEscrowTx.hash)
+                console.log(`   Transaction receipt logs count: ${receipt.logs.length}`)
+                
+                // Find the escrow creation event to get the escrow address
+                srcEscrowAddress = null
+                for (const log of receipt.logs) {
+                    try {
+                        const parsed = srcFactoryContract.interface.parseLog(log)
+                        console.log(`   Found event: ${parsed.name}`)
+                        
+                        // Check for SrcEscrowCreatedDirect event which contains the escrow address directly
+                        if (parsed.name === 'SrcEscrowCreatedDirect') {
+                            srcEscrowAddress = parsed.args.escrow
+                            console.log(`   ✅ Found SrcEscrowCreatedDirect event with escrow: ${srcEscrowAddress}`)
+                            break
+                        }
+                        // Check for SrcEscrowCreated event (contains full immutables)
+                        else if (parsed.name === 'SrcEscrowCreated') {
+                            console.log(`   Found SrcEscrowCreated event`)
+                            // For this event, we need to compute the escrow address deterministically
+                            const srcImmutablesForAddress = {
+                                orderHash: parsed.args.srcImmutables.orderHash,
+                                hashlock: parsed.args.srcImmutables.hashlock,
+                                maker: parsed.args.srcImmutables.maker,
+                                taker: parsed.args.srcImmutables.taker,
+                                token: parsed.args.srcImmutables.token,
+                                amount: parsed.args.srcImmutables.amount,
+                                safetyDeposit: parsed.args.srcImmutables.safetyDeposit,
+                                timelocks: parsed.args.srcImmutables.timelocks
+                            }
+                            srcEscrowAddress = await srcFactoryContract.addressOfEscrowSrc(srcImmutablesForAddress)
+                            console.log(`   ✅ Computed escrow address from SrcEscrowCreated: ${srcEscrowAddress}`)
+                            break
+                        }
+                    } catch (e) {
+                        console.log(`   Could not parse log: ${e.message}`)
+                        console.log(`   Log topics: ${log.topics.join(', ')}`)
+                    }
+                }
+                
+                if (!srcEscrowAddress) {
+                    // CRITICAL: We need the actual deployed address, not deterministic
+                    console.log(`   ❌ CRITICAL ERROR: Could not find escrow address in logs!`)
+                    console.log(`   Available events in logs:`)
+                    for (const log of receipt.logs) {
+                        console.log(`     - Topics: ${log.topics.join(', ')}`)
+                        console.log(`     - Data: ${log.data}`)
+                    }
+                    throw new Error('Failed to get deployed source escrow address from transaction logs')
+                }
+                
+                swapData.srcEscrowAddress = srcEscrowAddress
+                console.log(`   ✅ Source escrow created: ${srcEscrowAddress} (with higher gas)`)
+            } catch (retryError) {
+                console.log(`   ❌ CreateSrcEscrow retry failed: ${retryError.message}`)
+                throw new Error(`Failed to create source escrow: ${retryError.message}`)
+            }
         }
 
-        swapData.srcEscrowAddress = srcEscrowAddress
-        console.log(`   ✅ Source escrow created: ${srcEscrowAddress}`)
+        // Step 6: Verify funds are locked (adapted from arb-sep.js)
+        console.log('   🔍 Verifying funds are locked...')
+        const srcEscrowBalance = await srcToken.balanceOf(srcEscrowAddress)
+        const dstEscrowBalance = await dstToken.balanceOf(dstEscrowAddress)
+        const srcEscrowEth = await srcProvider.getBalance(srcEscrowAddress)
+        const dstEscrowEth = await dstProvider.getBalance(dstEscrowAddress)
+        
+        console.log(`   Source escrow USDC: ${ethers.formatUnits(srcEscrowBalance, 6)}`)
+        console.log(`   Destination escrow USDC: ${ethers.formatUnits(dstEscrowBalance, 6)}`)
+        console.log(`   Source escrow ETH: ${ethers.formatEther(srcEscrowEth)}`)
+        console.log(`   Destination escrow ETH: ${ethers.formatEther(dstEscrowEth)}`)
+        
+        if (srcEscrowBalance >= swapData.amount && dstEscrowBalance >= swapData.amount) {
+            console.log('   ✅ Funds successfully locked in both escrow contracts!')
+        } else {
+            console.log('   ❌ Funds not properly locked')
+            throw new Error('Funds not properly locked in escrow contracts')
+        }
 
-        // Step 5: Wait a bit then execute withdrawals
+        // Step 7: Wait for finality then execute withdrawals
         console.log('   Waiting for finality...')
         await new Promise(resolve => setTimeout(resolve, 10000)) // Wait 10 seconds
 
-        // Step 6: Withdraw from source escrow (user gets their tokens)
+        // Step 8: Withdraw from source escrow (adapted from arb-sep.js)
         console.log('   Relayer: Withdrawing from source escrow...')
         swapData.status = 'withdrawing_src'
         activeSwaps.set(swapData.orderHash, swapData)
 
-        const srcEscrowContract = new ethers.Contract(srcEscrowAddress, ESCROW_ABI, srcRelayer)
-        const withdrawSrcTx = await srcEscrowContract.withdraw(swapData.secret, swapData.srcImmutables)
-        await withdrawSrcTx.wait()
-        console.log('   ✅ Relayer withdrew from source escrow (secret revealed)')
+        try {
+            // Check escrow balance before withdrawal
+            const srcEscrowBalanceBefore = await srcToken.balanceOf(srcEscrowAddress)
+            console.log(`   Source escrow balance before withdrawal: ${ethers.formatUnits(srcEscrowBalanceBefore, 6)} USDC`)
+            
+            // Use direct escrow contract for withdrawal (like in arb-sep.js)
+            const srcEscrowContract = new ethers.Contract(srcEscrowAddress, ESCROW_ABI, srcRelayer)
+            
+            try {
+                const gasEstimate = await srcEscrowContract.withdraw.estimateGas(swapData.secret, swapData.srcImmutables)
+                console.log(`   Direct escrow gas estimate: ${gasEstimate.toString()}`)
+                
+                const withdrawSrcTx = await srcEscrowContract.withdraw(swapData.secret, swapData.srcImmutables, {
+                    gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
+                })
+                console.log(`   Source withdrawal transaction hash: ${withdrawSrcTx.hash}`)
+                await withdrawSrcTx.wait()
+                
+                // Verify withdrawal
+                const srcEscrowBalanceAfter = await srcToken.balanceOf(srcEscrowAddress)
+                console.log(`   Source escrow balance after withdrawal: ${ethers.formatUnits(srcEscrowBalanceAfter, 6)} USDC`)
+                
+                if (srcEscrowBalanceAfter < srcEscrowBalanceBefore) {
+                    console.log('   ✅ Relayer successfully withdrew tokens from source escrow')
+                } else {
+                    console.log('   ❌ Source withdrawal may have failed - balance unchanged')
+                }
+                console.log('   🔓 Secret is now public on source chain')
+            } catch (error) {
+                console.log(`   ❌ Direct escrow withdrawal failed: ${error.message}`)
+                console.log('   💡 Trying with higher gas limit...')
+                
+                const withdrawSrcTx = await srcEscrowContract.withdraw(swapData.secret, swapData.srcImmutables, {
+                    gasLimit: 200000n // Use higher gas limit
+                })
+                await withdrawSrcTx.wait()
+                console.log('   ✅ Relayer withdrew tokens from source escrow (with higher gas)')
+            }
+        } catch (error) {
+            console.log(`   ❌ Source escrow withdrawal failed: ${error.message}`)
+            throw new Error(`Failed to withdraw from source escrow: ${error.message}`)
+        }
 
-        // Step 7: Withdraw from destination escrow (complete the swap)
+        // Step 9: Withdraw from destination escrow (adapted from arb-sep.js)
         console.log('   Relayer: Withdrawing from destination escrow...')
         swapData.status = 'withdrawing_dst'
         activeSwaps.set(swapData.orderHash, swapData)
 
-        const dstEscrowContract = new ethers.Contract(dstEscrowAddress, ESCROW_ABI, dstRelayer)
-        const withdrawDstTx = await dstEscrowContract.withdraw(swapData.secret, swapData.dstImmutables)
-        await withdrawDstTx.wait()
-        console.log('   ✅ Relayer withdrew from destination escrow')
+        try {
+            // Check escrow balance before withdrawal
+            const dstEscrowBalanceBefore = await dstToken.balanceOf(dstEscrowAddress)
+            console.log(`   Destination escrow balance before withdrawal: ${ethers.formatUnits(dstEscrowBalanceBefore, 6)} USDC`)
+            
+            // Use direct escrow contract for withdrawal (like in arb-sep.js)
+            const dstEscrowContract = new ethers.Contract(dstEscrowAddress, ESCROW_ABI, dstRelayer)
+            
+            try {
+                const gasEstimate = await dstEscrowContract.withdraw.estimateGas(swapData.secret, swapData.dstImmutables)
+                console.log(`   Direct escrow gas estimate: ${gasEstimate.toString()}`)
+                
+                const withdrawDstTx = await dstEscrowContract.withdraw(swapData.secret, swapData.dstImmutables, {
+                    gasLimit: gasEstimate * 120n / 100n // Add 20% buffer
+                })
+                console.log(`   Destination withdrawal transaction hash: ${withdrawDstTx.hash}`)
+                await withdrawDstTx.wait()
+                
+                // Verify withdrawal
+                const dstEscrowBalanceAfter = await dstToken.balanceOf(dstEscrowAddress)
+                console.log(`   Destination escrow balance after withdrawal: ${ethers.formatUnits(dstEscrowBalanceAfter, 6)} USDC`)
+                
+                if (dstEscrowBalanceAfter < dstEscrowBalanceBefore) {
+                    console.log('   ✅ Relayer successfully withdrew tokens from destination escrow')
+                } else {
+                    console.log('   ❌ Destination withdrawal may have failed - balance unchanged')
+                }
+                console.log('   🎉 Cross-chain swap completed successfully!')
+            } catch (error) {
+                console.log(`   ❌ Direct escrow withdrawal failed: ${error.message}`)
+                console.log('   💡 Trying with higher gas limit...')
+                
+                const withdrawDstTx = await dstEscrowContract.withdraw(swapData.secret, swapData.dstImmutables, {
+                    gasLimit: 200000n // Use higher gas limit
+                })
+                await withdrawDstTx.wait()
+                console.log('   ✅ Relayer withdrew tokens from destination escrow (with higher gas)')
+            }
+        } catch (error) {
+            console.log(`   ❌ Destination escrow withdrawal failed: ${error.message}`)
+            throw new Error(`Failed to withdraw from destination escrow: ${error.message}`)
+        }
 
-        // Step 8: Transfer destination tokens to user
+        // Step 10: Transfer destination tokens to user
         console.log('   Relayer: Transferring destination tokens to user...')
-        const transferTx = await dstToken.transfer(swapData.userAddress, swapData.amount)
-        await transferTx.wait()
-        console.log('   ✅ Destination tokens transferred to user')
+        try {
+            const transferTx = await dstToken.transfer(swapData.userAddress, swapData.amount)
+            await transferTx.wait()
+            console.log('   ✅ Destination tokens transferred to user')
+        } catch (error) {
+            console.log(`   ❌ Token transfer to user failed: ${error.message}`)
+            throw new Error(`Failed to transfer tokens to user: ${error.message}`)
+        }
 
         swapData.status = 'completed'
         swapData.completedAt = new Date().toISOString()
@@ -612,19 +1034,107 @@ async function executeSwapAsync(swapData) {
     }
 }
 
+// Global variables to store deployed contracts
+let deployedContracts = null
+
+// Auto-deploy contracts on startup
+async function initializeServer() {
+    try {
+        console.log('🔧 Initializing server and deploying contracts...')
+        
+        // Try to load existing contracts first
+        try {
+            const fs = await import('fs')
+            const existingContracts = JSON.parse(fs.readFileSync('./deployed-contracts.json', 'utf8'))
+            console.log('📋 Found existing deployed contracts')
+            deployedContracts = existingContracts
+        } catch (e) {
+            console.log('📋 No existing contracts found, will deploy fresh ones')
+        }
+        
+        // Always deploy fresh contracts on server start (ignore existing ones)
+        console.log('🚀 Deploying fresh contracts on server startup...')
+        
+        try {
+            console.log('🚀 Deploying contracts on Sepolia...')
+            const srcDeployment = await deployContracts(srcProvider, srcRelayer, config.chain.source, 'Sepolia')
+            
+            console.log('🚀 Deploying contracts on Arbitrum Sepolia...')
+            const dstDeployment = await deployContracts(dstProvider, dstRelayer, config.chain.destination, 'Arbitrum Sepolia')
+            
+            deployedContracts = {
+                sepolia: {
+                    escrowFactory: srcDeployment.escrowFactory,
+                    resolver: srcDeployment.resolver,
+                    lastDeployed: new Date().toISOString()
+                },
+                arbitrumSepolia: {
+                    escrowFactory: dstDeployment.escrowFactory,
+                    resolver: dstDeployment.resolver,
+                    lastDeployed: new Date().toISOString()
+                }
+            }
+            
+            // Save deployed contracts
+            const fs = await import('fs')
+            fs.writeFileSync('./deployed-contracts.json', JSON.stringify(deployedContracts, null, 2))
+            console.log('💾 Saved deployed contracts to file')
+            
+            console.log('✅ Contract deployment complete')
+            console.log(`📋 Sepolia Factory: ${deployedContracts.sepolia.escrowFactory}`)
+            console.log(`📋 Arbitrum Sepolia Factory: ${deployedContracts.arbitrumSepolia.escrowFactory}`)
+        } catch (deploymentError) {
+            console.error('❌ Contract deployment failed:', deploymentError.message)
+            console.log('⚠️ Server will continue without fresh deployments')
+            
+            // If we have existing contracts, use those
+            if (!deployedContracts) {
+                console.log('❌ No existing contracts available, some features may not work')
+                deployedContracts = null
+            }
+        }
+        
+        console.log('✅ Server initialization complete')
+        
+    } catch (error) {
+        console.error('❌ Server initialization failed:', error)
+        console.log('⚠️ Server will start anyway, but some features may not work properly')
+        deployedContracts = null
+    }
+}
+
 // Start server
-app.listen(PORT, () => {
-    console.log(`🚀 Cross-chain swap relayer server running on port ${PORT}`)
-    console.log(`📡 Health check: http://localhost:${PORT}/health`)
-    
-    // Validate environment variables
-    if (!process.env.PRIVATE_KEY || !process.env.SRC_CHAIN_RPC || !process.env.DST_CHAIN_RPC) {
-        console.error('❌ Missing required environment variables: PRIVATE_KEY, SRC_CHAIN_RPC, DST_CHAIN_RPC')
+// Start server
+async function startServer() {
+    try {
+        console.log(`🚀 Cross-chain swap relayer server starting on port ${PORT}`)
+        console.log(`📡 Health check: http://localhost:${PORT}/health`)
+        
+        // Validate environment variables first
+        if (!process.env.PRIVATE_KEY || !process.env.SRC_CHAIN_RPC || !process.env.DST_CHAIN_RPC) {
+            console.error('❌ Missing required environment variables: PRIVATE_KEY, SRC_CHAIN_RPC, DST_CHAIN_RPC')
+            process.exit(1)
+        }
+        
+        console.log('✅ Environment variables validated')
+        
+        // Initialize server and deploy contracts
+        await initializeServer()
+        
+        // Start the HTTP server
+        app.listen(PORT, () => {
+            console.log(`🎯 Server is ready to accept requests on port ${PORT}!`)
+            console.log('💡 Press Ctrl+C to stop the server')
+        })
+        
+    } catch (error) {
+        console.error('❌ Failed to start server:', error)
         process.exit(1)
     }
-    
-    console.log('✅ Environment variables validated')
-})
+}
+
+// Start the server
+startServer()
 
 // Graceful shutdown
 process.on('SIGINT', () => {

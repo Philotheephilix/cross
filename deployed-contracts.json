@@ -1,12 +1,12 @@
 {
   "sepolia": {
-    "escrowFactory": "0x707Bfe09631042C4fC5Dba6f17626A8Cb2341706",
-    "resolver": "0x124081fC8431ED71c5F8e0fD421e06FaD541B3B5",
-    "lastDeployed": "2025-08-03T12:01:37.567Z"
+    "escrowFactory": "0x741BDe6e23a9c36194C9AEb624Ec2F4655fa296A",
+    "resolver": "0x8b9bBcC6387F72e34fe7462e6752eE382c569205",
+    "lastDeployed": "2025-08-03T12:30:00.050Z"
   },
   "arbitrumSepolia": {
-    "escrowFactory": "0x4678DB83fd35Fc8613Cd4969584dee9830c42430",
-    "resolver": "0x1Fb2DA7cCCcDC6E97768B1Fa68da94D6dcba2bB9",
-    "lastDeployed": "2025-08-03T12:01:11.347Z"
+    "escrowFactory": "0x7b2329a6cFe1b2B70A6Ef0623D1E74A197B94ed1",
+    "resolver": "0x40eF1825B1Ee070b2508230Ca636909f733C9Ff1",
+    "lastDeployed": "2025-08-03T12:30:00.050Z"
   }
 }
