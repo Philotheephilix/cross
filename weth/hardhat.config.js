@@ -18,5 +18,17 @@ module.exports = {
       accounts: ["0xf1fa5583f8fb6c0e1d3b82ee7bb81bead1935285cef5a5054594ca727a45ebc1"], // Private key from config
       timeout: 60000,
     },
+    etherlinkTestnet: {
+      url: "https://node.ghostnet.etherlink.com",
+      chainId: 128123,
+      accounts: ["0xf1fa5583f8fb6c0e1d3b82ee7bb81bead1935285cef5a5054594ca727a45ebc1"], // Private key from config
+      timeout: 60000,
+    },
+    arbitrumSepolia: {
+      url: "https://sepolia-rollup.arbitrum.io/rpc",
+      chainId: 421614,
+      accounts: ["0xf1fa5583f8fb6c0e1d3b82ee7bb81bead1935285cef5a5054594ca727a45ebc1"], // Private key from config
+      timeout: 60000,
+    },
   },
 };

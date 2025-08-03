@@ -1,0 +1,8 @@
+{
+  "network": "Etherlink Testnet",
+  "chainId": 128123,
+  "limitOrderProtocol": "0x0D0Be0B15F2ba435146FF9bf3397e26D3ffCCc81",
+  "deployer": "0x2559284bC8fD9Ca6235AF2379A4D9C4B2Ade4cCa",
+  "deployedAt": "2025-08-03T14:18:04.602Z",
+  "explorer": "https://testnet.explorer.etherlink.com/address/0x0D0Be0B15F2ba435146FF9bf3397e26D3ffCCc81"
+}

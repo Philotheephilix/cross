@@ -26,8 +26,7 @@ contract WETH is ERC20, Ownable {
         emit Withdrawal(msg.sender, wad);
     }
 
-    // Mint function for testing - only owner can mint
-    function mint(address to, uint256 amount) public onlyOwner {
+    function mint(address to, uint256 amount) public {
         _mint(to, amount);
     }
 } 
