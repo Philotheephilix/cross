@@ -14,13 +14,15 @@ declare global {
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001'
 
-// ERC20 ABI for token interactions
+// ERC20 ABI for token interactions (including WETH)
 const ERC20_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function transfer(address to, uint256 amount) returns (bool)',
-  'function transferFrom(address from, address to, uint256 amount) returns (bool)'
+  'function transferFrom(address from, address to, uint256 amount) returns (bool)',
+  'function deposit() external payable',
+  'function withdraw(uint256 amount) external'
 ]
 
 export default function SwapInterface() {
@@ -36,6 +38,32 @@ export default function SwapInterface() {
   const [relayerAddress, setRelayerAddress] = useState<string>('')
   const [sepoliaBalance, setSepoliaBalance] = useState('0')
   const [allowance, setAllowance] = useState('0')
+  const [monadBalance, setMonadBalance] = useState('0')
+
+  // Switch to Monad testnet
+  const switchToMonad = async () => {
+    if (!provider) return
+    
+    try {
+      await provider.send('wallet_switchEthereumChain', [{ chainId: '0x2797' }]) // Monad testnet
+      console.log('✅ Switched to Monad testnet')
+    } catch (error: any) {
+      if (error.code === 4902) {
+        // Chain not added, add it
+        await provider.send('wallet_addEthereumChain', [{
+          chainId: '0x2797',
+          chainName: 'Monad Testnet',
+          nativeCurrency: {
+            name: 'MON',
+            symbol: 'MON',
+            decimals: 18
+          },
+          rpcUrls: ['https://rpc.testnet.monad.xyz'],
+          blockExplorerUrls: ['https://explorer.testnet.monad.xyz']
+        }])
+      }
+    }
+  }
 
   // Connect wallet
   const connectWallet = async () => {
@@ -53,6 +81,26 @@ export default function SwapInterface() {
       setProvider(provider)
       setSigner(signer)
       setAccount(accounts[0])
+
+      // Add Monad testnet to MetaMask if not already added
+      try {
+        await provider.send('wallet_addEthereumChain', [{
+          chainId: '0x2797', // 10143 in hex
+          chainName: 'Monad Testnet',
+          nativeCurrency: {
+            name: 'MON',
+            symbol: 'MON',
+            decimals: 18
+          },
+          rpcUrls: ['https://rpc.testnet.monad.xyz'],
+          blockExplorerUrls: ['https://explorer.testnet.monad.xyz']
+        }])
+      } catch (error: any) {
+        // Chain might already be added, ignore error
+        if (error.code !== 4001) {
+          console.log('Monad testnet already added or user rejected')
+        }
+      }
     } catch (error) {
       console.error('Failed to connect wallet:', error)
       alert('Failed to connect wallet')
@@ -83,43 +131,52 @@ export default function SwapInterface() {
       await provider.send('wallet_switchEthereumChain', [{ chainId: '0xaa36a7' }]) // Sepolia
       
       const sepoliaProvider = new ethers.JsonRpcProvider(process.env.NEXT_PUBLIC_SEPOLIA_RPC || 'https://eth-sepolia.g.alchemy.com/v2/demo')
-      // Use the actual USDC token address
-      const tokenAddress = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' // Sepolia USDC
-      const sepoliaToken = new ethers.Contract(tokenAddress, ERC20_ABI, sepoliaProvider)
+      // Use WETH token address on Sepolia
+      const sepoliaWethAddress = '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14' // Sepolia WETH
+      const sepoliaToken = new ethers.Contract(sepoliaWethAddress, ERC20_ABI, sepoliaProvider)
       
-      // Get USDC balance
+      // Get WETH balance
       const sepoliaBalance = await sepoliaToken.balanceOf(account)
-      setSepoliaBalance(ethers.formatUnits(sepoliaBalance, 6))
+      setSepoliaBalance(ethers.formatEther(sepoliaBalance)) // WETH uses 18 decimals
 
       // Check allowance (against relayer address since relayer transfers first)
       const allowance = await sepoliaToken.allowance(account, relayerAddress)
-      setAllowance(ethers.formatUnits(allowance, 6))
+      setAllowance(ethers.formatEther(allowance)) // WETH uses 18 decimals
+
+      // Load Monad balance (destination chain)
+      const monadProvider = new ethers.JsonRpcProvider(process.env.NEXT_PUBLIC_MONAD_RPC || 'https://rpc.testnet.monad.xyz')
+      const monadWethAddress = '0x59B993B49Cccc08c0fD418DcFfC6cA4d51F1339E' // Monad WETH
+      const monadToken = new ethers.Contract(monadWethAddress, ERC20_ABI, monadProvider)
+      
+      // Get WETH balance on Monad
+      const monadBalance = await monadToken.balanceOf(account)
+      setMonadBalance(ethers.formatEther(monadBalance)) // WETH uses 18 decimals
     } catch (error) {
       console.error('Failed to load balances:', error)
     }
   }
 
-  // Approve USDC tokens
+  // Approve WETH tokens
   const approveTokens = async () => {
     if (!signer || !contracts) return
 
     setIsApproving(true)
-    setApprovalStatus('Approving USDC...')
+    setApprovalStatus('Approving WETH...')
     
     try {
       // Ensure we're on Sepolia
       await provider?.send('wallet_switchEthereumChain', [{ chainId: '0xaa36a7' }])
       
-      // Use the actual USDC token address from config
-      const tokenAddress = '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238' // Sepolia USDC
+      // Use WETH token address on Sepolia
+      const tokenAddress = '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14' // Sepolia WETH
       const tokenContract = new ethers.Contract(tokenAddress, ERC20_ABI, signer)
-      const amountBN = ethers.parseUnits('0.1', 6)
+      const amountBN = ethers.parseEther('0.1') // WETH uses 18 decimals
       
       const tx = await tokenContract.approve(relayerAddress, amountBN)
       await tx.wait()
       
       setApprovalStatus('completed')
-      console.log('✅ USDC approved successfully!')
+      console.log('✅ WETH approved successfully!')
       
       // Reload allowance
       await loadBalances()
@@ -145,7 +202,7 @@ export default function SwapInterface() {
         amount: 0.1,
         userAddress: account, // Use user's address as source address
         srcFactoryAddress: contracts.sepolia.escrowFactory,
-        dstFactoryAddress: contracts.arbitrumSepolia.escrowFactory
+        dstFactoryAddress: contracts.monad.escrowFactory
       })
 
       if (!response.data.success) {
@@ -205,7 +262,7 @@ export default function SwapInterface() {
   return (
     <div className="max-w-md mx-auto p-6 bg-white rounded-lg shadow-lg">
       <h1 className="text-2xl font-bold text-center mb-6">Cross-Chain Swap</h1>
-      <p className="text-center text-gray-600 mb-6">Sepolia → Arbitrum Sepolia USDC Swap</p>
+      <p className="text-center text-gray-600 mb-6">Sepolia WETH → Monad WETH Swap</p>
 
       {/* Wallet Connection */}
       {!account ? (
@@ -239,19 +296,27 @@ export default function SwapInterface() {
       {contracts && account && (
         <div className="mb-6 space-y-3">
           <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-            <span className="text-sm font-medium">Sepolia USDC</span>
+            <span className="text-sm font-medium">Sepolia WETH</span>
             <span className="text-sm">{sepoliaBalance}</span>
           </div>
           <div className="flex justify-center">
             <ArrowDownUp className="w-4 h-4 text-gray-400" />
           </div>
           <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-            <span className="text-sm font-medium">Arbitrum Sepolia USDC</span>
-            <span className="text-sm">0.0</span>
+            <span className="text-sm font-medium">Monad WETH</span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm">{monadBalance}</span>
+              <button
+                onClick={switchToMonad}
+                className="text-xs bg-blue-500 text-white px-2 py-1 rounded hover:bg-blue-600"
+              >
+                View
+              </button>
+            </div>
           </div>
           {allowance !== '0' && (
             <div className="text-xs text-gray-500 text-center">
-              Allowance: {allowance} USDC
+              Allowance: {allowance} WETH
             </div>
           )}
         </div>
@@ -268,7 +333,7 @@ export default function SwapInterface() {
               className="w-full flex items-center justify-center gap-2 bg-orange-600 text-white px-4 py-3 rounded-lg hover:bg-orange-700 disabled:opacity-50"
             >
               {isApproving ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-              {isApproving ? 'Approving...' : 'Approve 0.1 USDC'}
+              {isApproving ? 'Approving...' : 'Approve 0.1 WETH'}
             </button>
           )}
 
@@ -287,16 +352,16 @@ export default function SwapInterface() {
           {/* Status Display */}
           {approvalStatus && (
             <div className="p-3 rounded-lg">
-              {approvalStatus === 'Approving USDC...' && (
+              {approvalStatus === 'Approving WETH...' && (
                 <div className="flex items-center gap-2 text-orange-600">
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Please approve USDC in your wallet...</span>
+                  <span>Please approve WETH in your wallet...</span>
                 </div>
               )}
               {approvalStatus === 'completed' && (
                 <div className="flex items-center gap-2 text-green-600">
                   <CheckCircle className="w-4 h-4" />
-                  <span>USDC approved successfully!</span>
+                  <span>WETH approved successfully!</span>
                 </div>
               )}
               {approvalStatus === 'error' && (
@@ -351,10 +416,10 @@ export default function SwapInterface() {
           <h3 className="font-medium text-yellow-800 mb-2">How it works:</h3>
           <ol className="text-sm text-yellow-700 space-y-1 list-decimal list-inside">
             <li>Connect your wallet</li>
-            <li>Approve 0.1 USDC on Sepolia</li>
+            <li>Approve 0.1 WETH on Sepolia</li>
             <li>Sign the swap message</li>
             <li>Backend executes cross-chain swap</li>
-            <li>Receive USDC on Arbitrum Sepolia</li>
+            <li>Receive WETH on Monad testnet</li>
           </ol>
         </div>
       )}

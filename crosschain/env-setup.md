@@ -10,7 +10,7 @@ NEXT_PUBLIC_BACKEND_URL=http://localhost:3001
 
 # RPC Endpoints (for read-only operations)
 NEXT_PUBLIC_SEPOLIA_RPC=https://eth-sepolia.g.alchemy.com/v2/your-api-key
-NEXT_PUBLIC_ARBITRUM_SEPOLIA_RPC=https://arb-sepolia.g.alchemy.com/v2/your-api-key
+NEXT_PUBLIC_MONAD_RPC=https://rpc.testnet.monad.xyz
 ```
 
 ## Backend (.env)
@@ -24,7 +24,7 @@ RELAYER_PRIVATE_KEY=your-relayer-private-key
 
 # RPC endpoints
 SRC_CHAIN_RPC=https://eth-sepolia.g.alchemy.com/v2/your-api-key
-DST_CHAIN_RPC=https://arb-sepolia.g.alchemy.com/v2/your-api-key
+DST_CHAIN_RPC=https://rpc.testnet.monad.xyz
 
 # Server port
 PORT=3001
@@ -43,13 +43,13 @@ PORT=3001
 - [Alchemy Sepolia Faucet](https://sepoliafaucet.com/)
 - [Chainlink Sepolia Faucet](https://faucets.chain.link/sepolia)
 
-### Arbitrum Sepolia ETH
-- [Arbitrum Sepolia Faucet](https://faucet.quicknode.com/arbitrum/sepolia)
+### Monad Testnet MON
+- [Monad Testnet Faucet](https://faucet.testnet.monad.xyz/)
 
-### USDC on Sepolia
-- Contract: `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`
-- Use a faucet or mint function if available
+### WETH on Sepolia
+- Contract: `0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14`
+- Wrap ETH to get WETH using the contract's `deposit()` function
 
-### USDC on Arbitrum Sepolia  
-- Contract: `0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d`
-- Use a faucet or mint function if available
+### WETH on Monad Testnet
+- Contract: `0x59B993B49Cccc08c0fD418DcFfC6cA4d51F1339E`
+- Wrap MON to get WETH using the contract's `deposit()` function

@@ -25,6 +25,10 @@ export const config = {
             wrappedNative: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', // WETH on Sepolia
             ownerPrivateKey: '0x96fc8157b33348da998464a01a3d03b1f0e842103ddfa8d676cc79ea742bba63',
             tokens: {
+                WETH: {
+                    address: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', // WETH on Sepolia
+                    donor: '0x0000000000000000000000000000000000000000' // Will be set when available
+                },
                 USDC: {
                     address: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', // Sepolia USDC
                     donor: '0xd54F23BE482D9A58676590fCa79c8E43087f92fB'
@@ -32,15 +36,19 @@ export const config = {
             }
         },
         destination: {
-            chainId: 421614, // Arbitrum Sepolia testnet
+            chainId: 10143, // Monad testnet
             url: fromEnv.DST_CHAIN_RPC,
             createFork: fromEnv.DST_CHAIN_CREATE_FORK,
-            limitOrderProtocol: '0x98A320BF204385A4508A043493D41118c8463f13',
-            wrappedNative: '0x980B62Da83eFf3D4576C647993b0c1D7faf17c73', // WETH on Arbitrum Sepolia
+            limitOrderProtocol: '0x4aA294c0B461B454188053a7F055be5807f212B4', // Will need to deploy on Monad
+            wrappedNative: '0x59B993B49Cccc08c0fD418DcFfC6cA4d51F1339E', // WETH on Monad testnet
             ownerPrivateKey: '0x96fc8157b33348da998464a01a3d03b1f0e842103ddfa8d676cc79ea742bba63',
             tokens: {
+                WETH: {
+                    address: '0x59B993B49Cccc08c0fD418DcFfC6cA4d51F1339E', // WETH on Monad testnet
+                    donor: '0x0000000000000000000000000000000000000000' // Will be set when available
+                },
                 USDC: {
-                    address: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // Arbitrum Sepolia USDC
+                    address: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', // Keeping for compatibility
                     donor: '0x62383739d68dd0f844103db8dfb05a7eded5bbe6'
                 }
             }

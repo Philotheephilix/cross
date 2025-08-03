@@ -43,6 +43,17 @@ const ERC20_ABI = [
     'function transferFrom(address from, address to, uint256 amount) returns (bool)'
 ]
 
+// WETH ABI for wrapping/unwrapping ETH
+const WETH_ABI = [
+    'function deposit() external payable',
+    'function withdraw(uint256 amount) external',
+    'function balanceOf(address owner) view returns (uint256)',
+    'function transfer(address to, uint256 amount) returns (bool)',
+    'function approve(address spender, uint256 amount) returns (bool)',
+    'function allowance(address owner, address spender) view returns (uint256)',
+    'function transferFrom(address from, address to, uint256 amount) returns (bool)'
+]
+
 // EscrowFactory ABI for proper interactions
 const ESCROW_FACTORY_ABI = [
     'function createDstEscrow(tuple(bytes32 orderHash, bytes32 hashlock, uint256 maker, uint256 taker, uint256 token, uint256 amount, uint256 safetyDeposit, uint256 timelocks) dstImmutables, uint256 srcCancellationTimestamp) external payable',
@@ -65,9 +76,11 @@ const ESCROW_ABI = [
 // Store active swaps
 const activeSwaps = new Map()
 
-// Setup providers
+// Setup providers with ENS disabled for Monad testnet
 const srcProvider = new ethers.JsonRpcProvider(process.env.SRC_CHAIN_RPC)
-const dstProvider = new ethers.JsonRpcProvider(process.env.DST_CHAIN_RPC)
+const dstProvider = new ethers.JsonRpcProvider(process.env.DST_CHAIN_RPC, undefined, {
+    ensAddress: null // Disable ENS for Monad testnet
+})
 
 // Setup relayer wallets
 const srcRelayer = new ethers.Wallet(process.env.PRIVATE_KEY, srcProvider)
@@ -80,6 +93,11 @@ async function deployContracts(provider, deployer, chainConfig, chainName) {
         const contractToUse = factoryContract
         const factoryName = 'EscrowFactory'
         
+        console.log(`   Chain: ${chainName} (${chainConfig.chainId})`)
+        console.log(`   Limit Order Protocol: ${chainConfig.limitOrderProtocol}`)
+        console.log(`   WETH Address: ${chainConfig.tokens.WETH.address}`)
+        console.log(`   Deployer: ${deployer.address}`)
+        
         // Deploy EscrowFactory (same as arb-sep.js)
         const factoryFactory = new ethers.ContractFactory(
             contractToUse.abi,
@@ -88,11 +106,17 @@ async function deployContracts(provider, deployer, chainConfig, chainName) {
         )
         
         console.log(`   Deploying ${factoryName}...`)
+        
+        // Ensure all addresses are properly formatted
+        const limitOrderProtocol = ethers.getAddress(chainConfig.limitOrderProtocol)
+        const wethAddress = ethers.getAddress(chainConfig.tokens.WETH.address)
+        const deployerAddress = ethers.getAddress(deployer.address)
+        
         const escrowFactory = await factoryFactory.deploy(
-            chainConfig.limitOrderProtocol,
-            chainConfig.tokens.USDC.address,
-            chainConfig.limitOrderProtocol,
-            deployer.address,
+            limitOrderProtocol,
+            wethAddress, // Use WETH instead of USDC
+            limitOrderProtocol,
+            deployerAddress,
             3600, // rescueDelaySrc
             3600  // rescueDelayDst
         )
@@ -109,8 +133,8 @@ async function deployContracts(provider, deployer, chainConfig, chainName) {
         console.log('   Deploying Resolver...')
         const resolver = await resolverFactory.deploy(
             await escrowFactory.getAddress(),
-            chainConfig.limitOrderProtocol,
-            deployer.address
+            limitOrderProtocol, // Use the formatted address
+            deployerAddress // Use the formatted address
         )
         await resolver.waitForDeployment()
         console.log(`   Resolver deployed: ${await resolver.getAddress()}`)
@@ -157,9 +181,9 @@ app.post('/api/deploy-factories', async (req, res) => {
         console.log('Deploying on Sepolia (source)...')
                     const srcDeployed = await deployContracts(srcProvider, srcRelayer, config.chain.source, 'Sepolia')
         
-        // Deploy on destination chain (Arbitrum Sepolia)
-        console.log('Deploying on Arbitrum Sepolia (destination)...')
-        const dstDeployed = await deployContracts(dstProvider, dstRelayer, config.chain.destination, 'Arbitrum Sepolia')
+        // Deploy on destination chain (Monad)
+        console.log('Deploying on Monad (destination)...')
+        const dstDeployed = await deployContracts(dstProvider, dstRelayer, config.chain.destination, 'Monad')
 
         const deploymentInfo = {
             sepolia: {
@@ -167,14 +191,14 @@ app.post('/api/deploy-factories', async (req, res) => {
                 resolver: srcDeployed.resolver,
                 chainId: config.chain.source.chainId
             },
-            arbitrumSepolia: {
+            monad: {
                 escrowFactory: dstDeployed.escrowFactory,
                 resolver: dstDeployed.resolver,
                 chainId: config.chain.destination.chainId
             },
             tokens: {
-                sepolia: config.chain.source.tokens.USDC.address,
-                arbitrumSepolia: config.chain.destination.tokens.USDC.address
+                sepolia: config.chain.source.tokens.WETH.address,
+                monad: config.chain.destination.tokens.WETH.address
             },
             deployedAt: new Date().toISOString()
         }
@@ -202,13 +226,13 @@ app.post('/api/create-order', async (req, res) => {
             dstFactoryAddress 
         } = req.body
 
-        console.log(`🔄 Creating order for ${amount} USDC swap from ${userAddress}`)
+        console.log(`🔄 Creating order for ${amount} WETH swap from ${userAddress}`)
 
         // Generate HTLC secret and hashlock
         const secret = uint8ArrayToHex(randomBytes(32))
         const hashlock = ethers.keccak256(secret)
         
-        const swapAmount = ethers.parseUnits(amount.toString(), 6)
+        const swapAmount = ethers.parseEther(amount.toString()) // WETH uses 18 decimals
         const safetyDeposit = ethers.parseEther('0.001')
 
         // Create Fusion+ order
@@ -220,8 +244,8 @@ app.post('/api/create-order', async (req, res) => {
                 maker: userAddress,
                 makingAmount: swapAmount,
                 takingAmount: swapAmount,
-                makerAsset: config.chain.source.tokens.USDC.address, // Sepolia USDC
-                takerAsset: config.chain.destination.tokens.USDC.address // Arbitrum Sepolia USDC
+                makerAsset: config.chain.source.tokens.WETH.address, // Sepolia WETH
+                takerAsset: config.chain.destination.tokens.WETH.address // Monad WETH
             },
             {
                 allowPartialFills: true,
@@ -258,7 +282,7 @@ app.post('/api/create-order', async (req, res) => {
             hashlock: srcImmutables.hashlock,
             maker: srcImmutables.maker,
             taker: BigInt(userAddress),
-            token: BigInt(config.chain.destination.tokens.USDC.address),
+            token: BigInt(config.chain.destination.tokens.WETH.address), // Monad WETH
             amount: swapAmount,
             safetyDeposit: safetyDeposit,
             timelocks: timelocksWithDeployedAt
@@ -326,7 +350,7 @@ app.post('/api/create-order', async (req, res) => {
             orderHash,
             typedData,
             approvalData: {
-                tokenAddress: config.chain.source.tokens.USDC.address,
+                tokenAddress: config.chain.source.tokens.WETH.address,
                 spender: srcFactoryAddress,
                 amount: swapAmount.toString()
             }
@@ -430,7 +454,7 @@ app.get('/api/swap-status/:swapId', (req, res) => {
         status: swapData.status,
         swapId,
         details: {
-            amount: ethers.formatUnits(swapData.amount, 6),
+            amount: ethers.formatEther(swapData.amount), // WETH uses 18 decimals
             userAddress: swapData.userAddress,
             createdAt: swapData.createdAt,
             srcEscrowAddress: swapData.srcEscrowAddress || null,
@@ -447,26 +471,47 @@ async function executeSwapAsync(swapData) {
         // Setup contracts using the same approach as arb-sep.js (EscrowFactory for both chains)
         const srcFactoryContract = new ethers.Contract(swapData.srcFactoryAddress, factoryContract.abi, srcRelayer)
         const dstFactoryContract = new ethers.Contract(swapData.dstFactoryAddress, factoryContract.abi, dstRelayer)
-        const srcToken = new ethers.Contract(config.chain.source.tokens.USDC.address, ERC20_ABI, srcRelayer)
-        const dstToken = new ethers.Contract(config.chain.destination.tokens.USDC.address, ERC20_ABI, dstRelayer)
+        const srcToken = new ethers.Contract(config.chain.source.tokens.WETH.address, WETH_ABI, srcRelayer)
+        const dstToken = new ethers.Contract(config.chain.destination.tokens.WETH.address, WETH_ABI, dstRelayer)
 
-        // Step 1: Relayer approves USDC on destination chain (adapted from arb-sep.js)
-        console.log('   Relayer: Approving USDC spending on destination chain...')
+        // Step 1: Check WETH balance on destination chain (no wrapping - user handles this)
+        console.log('   Relayer: Checking WETH balance on destination chain...')
+        swapData.status = 'checking_dst_balance'
+        activeSwaps.set(swapData.orderHash, swapData)
+        
+        try {
+            // Check current WETH balance
+            const currentWethBalance = await dstToken.balanceOf(dstRelayer.address)
+            console.log(`   Current WETH balance: ${ethers.formatEther(currentWethBalance)} WETH`)
+            
+            if (currentWethBalance < swapData.amount) {
+                console.log(`   ❌ Insufficient WETH balance: ${ethers.formatEther(currentWethBalance)} < ${ethers.formatEther(swapData.amount)}`)
+                throw new Error(`Insufficient WETH balance for swap: ${ethers.formatEther(currentWethBalance)} available, ${ethers.formatEther(swapData.amount)} needed. Please wrap ETH to WETH manually.`)
+            }
+            
+            console.log(`   ✅ Sufficient WETH balance available: ${ethers.formatEther(currentWethBalance)}`)
+        } catch (error) {
+            console.log(`   ❌ WETH balance check failed: ${error.message}`)
+            throw new Error(`Failed to check WETH balance: ${error.message}`)
+        }
+
+        // Step 2: Relayer approves WETH on destination chain (adapted from arb-sep.js)
+        console.log('   Relayer: Approving WETH spending on destination chain...')
         swapData.status = 'approving_dst'
         activeSwaps.set(swapData.orderHash, swapData)
         
         try {
             // Check current allowance first
             const currentAllowance = await dstToken.allowance(dstRelayer.address, swapData.dstFactoryAddress)
-            console.log(`   Current allowance: ${ethers.formatUnits(currentAllowance, 6)} USDC`)
+            console.log(`   Current allowance: ${ethers.formatEther(currentAllowance)} WETH`)
             
             if (currentAllowance < swapData.amount) {
                 // Check balance before approval
                 const dstBalance = await dstToken.balanceOf(dstRelayer.address)
-                console.log(`   Relayer destination USDC balance: ${ethers.formatUnits(dstBalance, 6)}`)
+                console.log(`   Relayer destination WETH balance: ${ethers.formatEther(dstBalance)}`)
                 
                 if (dstBalance < swapData.amount) {
-                    throw new Error(`Insufficient relayer balance on destination chain: ${ethers.formatUnits(dstBalance, 6)} USDC`)
+                    throw new Error(`Insufficient relayer balance on destination chain: ${ethers.formatEther(dstBalance)} WETH`)
                 }
                 
                 // Estimate gas for approval
@@ -478,9 +523,9 @@ async function executeSwapAsync(swapData) {
                 })
                 console.log(`   Approval transaction hash: ${approveDstTx.hash}`)
                 await approveDstTx.wait()
-                console.log('   ✅ Relayer approved USDC on destination chain')
+                console.log('   ✅ Relayer approved WETH on destination chain')
             } else {
-                console.log('   ✅ USDC already approved on destination chain')
+                console.log('   ✅ WETH already approved on destination chain')
             }
         } catch (error) {
             console.log(`   ❌ Destination chain approval failed: ${error.message}`)
@@ -491,14 +536,14 @@ async function executeSwapAsync(swapData) {
                     gasLimit: 100000n // Use higher gas limit
                 })
                 await approveDstTx.wait()
-                console.log('   ✅ Relayer approved USDC on destination chain (with higher gas)')
+                console.log('   ✅ Relayer approved WETH on destination chain (with higher gas)')
             } catch (retryError) {
                 console.log(`   ❌ Approval retry failed: ${retryError.message}`)
-                throw new Error(`Failed to approve USDC on destination chain: ${retryError.message}`)
+                throw new Error(`Failed to approve WETH on destination chain: ${retryError.message}`)
             }
         }
 
-        // Step 2: Relayer creates destination escrow (adapted from arb-sep.js)
+        // Step 3: Relayer creates destination escrow (adapted from arb-sep.js)
         console.log('   Relayer: Creating destination escrow with taker tokens...')
         swapData.status = 'creating_dst_escrow'
         activeSwaps.set(swapData.orderHash, swapData)
@@ -507,10 +552,10 @@ async function executeSwapAsync(swapData) {
         try {
             // Check balance before creating escrow
             const dstBalance = await dstToken.balanceOf(dstRelayer.address)
-            console.log(`   Relayer destination USDC balance: ${ethers.formatUnits(dstBalance, 6)}`)
+            console.log(`   Relayer destination WETH balance: ${ethers.formatEther(dstBalance)}`)
             
             if (dstBalance < swapData.amount) {
-                throw new Error(`Insufficient USDC balance for destination escrow: ${ethers.formatUnits(dstBalance, 6)} USDC`)
+                throw new Error(`Insufficient WETH balance for destination escrow: ${ethers.formatEther(dstBalance)} WETH`)
             }
             
             const srcCancellationTimestamp = Math.floor(Date.now() / 1000) + 3600 // 1 hour from now
@@ -581,9 +626,9 @@ async function executeSwapAsync(swapData) {
             }
             
             swapData.dstEscrowAddress = dstEscrowAddress
-            console.log(`   ✅ Relayer created destination escrow with ${ethers.formatUnits(swapData.amount, 6)} USDC`)
+            console.log(`   ✅ Relayer created destination escrow with ${ethers.formatEther(swapData.amount)} WETH`)
             
-            // Note: createDstEscrow already handles the USDC transfer to the escrow
+            // Note: createDstEscrow already handles the WETH transfer to the escrow
         } catch (error) {
             console.log(`   ❌ Destination escrow creation failed: ${error.message}`)
             console.log('   💡 Trying with higher gas limit...')
@@ -635,16 +680,16 @@ async function executeSwapAsync(swapData) {
                 
                 swapData.dstEscrowAddress = dstEscrowAddress
                 console.log(`   ✅ Relayer created destination escrow: ${dstEscrowAddress} (with higher gas)`)
-                console.log(`   ✅ Relayer created destination escrow with ${ethers.formatUnits(swapData.amount, 6)} USDC (with higher gas)`)
+                console.log(`   ✅ Relayer created destination escrow with ${ethers.formatEther(swapData.amount)} WETH (with higher gas)`)
                 
-                // Note: createDstEscrow already handles the USDC transfer to the escrow
+                // Note: createDstEscrow already handles the WETH transfer to the escrow
             } catch (retryError) {
                 console.log(`   ❌ CreateDstEscrow retry failed: ${retryError.message}`)
                 throw new Error(`Failed to create destination escrow: ${retryError.message}`)
             }
         }
 
-        // Step 3: Wait for user approval on source chain (USER APPROVES FROM WALLET)
+        // Step 4: Wait for user approval on source chain (USER APPROVES FROM WALLET)
         console.log('   Waiting for user approval on source chain...')
         swapData.status = 'waiting_src_approval'
         activeSwaps.set(swapData.orderHash, swapData)
@@ -659,7 +704,7 @@ async function executeSwapAsync(swapData) {
                 const allowance = await srcToken.allowance(swapData.userAddress, srcRelayer.address)
                 if (allowance >= swapData.amount) {
                     approved = true
-                    console.log('   ✅ User approval detected')
+                    console.log('   ✅ User WETH approval detected')
                 } else {
                     await new Promise(resolve => setTimeout(resolve, 5000)) // Wait 5 seconds
                     attempts++
@@ -671,30 +716,30 @@ async function executeSwapAsync(swapData) {
         }
 
         if (!approved) {
-            throw new Error('User approval timeout - user must approve USDC spending')
+            throw new Error('User approval timeout - user must approve WETH spending')
         }
 
-        // Step 4: Transfer USDC from user to relayer, then create source escrow
-        console.log('   Relayer: Transferring USDC from user to relayer...')
-        swapData.status = 'transferring_usdc'
+        // Step 5: Transfer WETH from user to relayer, then create source escrow
+        console.log('   Relayer: Transferring WETH from user to relayer...')
+        swapData.status = 'transferring_weth'
         activeSwaps.set(swapData.orderHash, swapData)
 
-        // Transfer USDC from user to relayer first
+        // Transfer WETH from user to relayer first
         try {
             const transferTx = await srcToken.transferFrom(swapData.userAddress, srcRelayer.address, swapData.amount)
             await transferTx.wait()
-            console.log('   ✅ USDC transferred from user to relayer')
+            console.log('   ✅ WETH transferred from user to relayer')
         } catch (error) {
-            console.log(`   ❌ USDC transfer failed: ${error.message}`)
-            throw new Error(`Failed to transfer USDC from user: ${error.message}`)
+            console.log(`   ❌ WETH transfer failed: ${error.message}`)
+            throw new Error(`Failed to transfer WETH from user: ${error.message}`)
         }
 
-        // Relayer approves USDC spending on source chain (adapted from arb-sep.js)
-        console.log('   Relayer: Approving USDC spending on source chain...')
+        // Relayer approves WETH spending on source chain (adapted from arb-sep.js)
+        console.log('   Relayer: Approving WETH spending on source chain...')
         try {
             // Check current allowance first
             const currentAllowance = await srcToken.allowance(srcRelayer.address, swapData.srcFactoryAddress)
-            console.log(`   Current allowance: ${ethers.formatUnits(currentAllowance, 6)} USDC`)
+            console.log(`   Current allowance: ${ethers.formatEther(currentAllowance)} WETH`)
             
             if (currentAllowance < swapData.amount) {
                 // Estimate gas for approval
@@ -706,9 +751,9 @@ async function executeSwapAsync(swapData) {
                 })
                 console.log(`   Approval transaction hash: ${approveSrcTx.hash}`)
                 await approveSrcTx.wait()
-                console.log('   ✅ Relayer approved USDC on source chain')
+                console.log('   ✅ Relayer approved WETH on source chain')
             } else {
-                console.log('   ✅ USDC already approved on source chain')
+                console.log('   ✅ WETH already approved on source chain')
             }
         } catch (error) {
             console.log(`   ❌ Source chain approval failed: ${error.message}`)
@@ -719,14 +764,14 @@ async function executeSwapAsync(swapData) {
                     gasLimit: 100000n // Use higher gas limit
                 })
                 await approveSrcTx.wait()
-                console.log('   ✅ Relayer approved USDC on source chain (with higher gas)')
+                console.log('   ✅ Relayer approved WETH on source chain (with higher gas)')
             } catch (retryError) {
                 console.log(`   ❌ Approval retry failed: ${retryError.message}`)
-                throw new Error(`Failed to approve USDC on source chain: ${retryError.message}`)
+                throw new Error(`Failed to approve WETH on source chain: ${retryError.message}`)
             }
         }
 
-        // Step 5: Create source escrow (adapted from arb-sep.js logic)
+        // Step 6: Create source escrow (adapted from arb-sep.js logic)
         console.log('   Relayer: Creating source escrow...')
         swapData.status = 'creating_src_escrow'
         activeSwaps.set(swapData.orderHash, swapData)
@@ -890,15 +935,15 @@ async function executeSwapAsync(swapData) {
             }
         }
 
-        // Step 6: Verify funds are locked (adapted from arb-sep.js)
+        // Step 7: Verify funds are locked (adapted from arb-sep.js)
         console.log('   🔍 Verifying funds are locked...')
         const srcEscrowBalance = await srcToken.balanceOf(srcEscrowAddress)
         const dstEscrowBalance = await dstToken.balanceOf(dstEscrowAddress)
         const srcEscrowEth = await srcProvider.getBalance(srcEscrowAddress)
         const dstEscrowEth = await dstProvider.getBalance(dstEscrowAddress)
         
-        console.log(`   Source escrow USDC: ${ethers.formatUnits(srcEscrowBalance, 6)}`)
-        console.log(`   Destination escrow USDC: ${ethers.formatUnits(dstEscrowBalance, 6)}`)
+        console.log(`   Source escrow WETH: ${ethers.formatEther(srcEscrowBalance)}`)
+        console.log(`   Destination escrow WETH: ${ethers.formatEther(dstEscrowBalance)}`)
         console.log(`   Source escrow ETH: ${ethers.formatEther(srcEscrowEth)}`)
         console.log(`   Destination escrow ETH: ${ethers.formatEther(dstEscrowEth)}`)
         
@@ -909,11 +954,11 @@ async function executeSwapAsync(swapData) {
             throw new Error('Funds not properly locked in escrow contracts')
         }
 
-        // Step 7: Wait for finality then execute withdrawals
+        // Step 8: Wait for finality then execute withdrawals
         console.log('   Waiting for finality...')
         await new Promise(resolve => setTimeout(resolve, 10000)) // Wait 10 seconds
 
-        // Step 8: Withdraw from source escrow (adapted from arb-sep.js)
+        // Step 9: Withdraw from source escrow (adapted from arb-sep.js)
         console.log('   Relayer: Withdrawing from source escrow...')
         swapData.status = 'withdrawing_src'
         activeSwaps.set(swapData.orderHash, swapData)
@@ -921,7 +966,7 @@ async function executeSwapAsync(swapData) {
         try {
             // Check escrow balance before withdrawal
             const srcEscrowBalanceBefore = await srcToken.balanceOf(srcEscrowAddress)
-            console.log(`   Source escrow balance before withdrawal: ${ethers.formatUnits(srcEscrowBalanceBefore, 6)} USDC`)
+            console.log(`   Source escrow balance before withdrawal: ${ethers.formatEther(srcEscrowBalanceBefore)} WETH`)
             
             // Use direct escrow contract for withdrawal (like in arb-sep.js)
             const srcEscrowContract = new ethers.Contract(srcEscrowAddress, ESCROW_ABI, srcRelayer)
@@ -938,7 +983,7 @@ async function executeSwapAsync(swapData) {
                 
                 // Verify withdrawal
                 const srcEscrowBalanceAfter = await srcToken.balanceOf(srcEscrowAddress)
-                console.log(`   Source escrow balance after withdrawal: ${ethers.formatUnits(srcEscrowBalanceAfter, 6)} USDC`)
+                console.log(`   Source escrow balance after withdrawal: ${ethers.formatEther(srcEscrowBalanceAfter)} WETH`)
                 
                 if (srcEscrowBalanceAfter < srcEscrowBalanceBefore) {
                     console.log('   ✅ Relayer successfully withdrew tokens from source escrow')
@@ -961,7 +1006,7 @@ async function executeSwapAsync(swapData) {
             throw new Error(`Failed to withdraw from source escrow: ${error.message}`)
         }
 
-        // Step 9: Withdraw from destination escrow (adapted from arb-sep.js)
+        // Step 10: Withdraw from destination escrow (adapted from arb-sep.js)
         console.log('   Relayer: Withdrawing from destination escrow...')
         swapData.status = 'withdrawing_dst'
         activeSwaps.set(swapData.orderHash, swapData)
@@ -969,7 +1014,7 @@ async function executeSwapAsync(swapData) {
         try {
             // Check escrow balance before withdrawal
             const dstEscrowBalanceBefore = await dstToken.balanceOf(dstEscrowAddress)
-            console.log(`   Destination escrow balance before withdrawal: ${ethers.formatUnits(dstEscrowBalanceBefore, 6)} USDC`)
+            console.log(`   Destination escrow balance before withdrawal: ${ethers.formatEther(dstEscrowBalanceBefore)} WETH`)
             
             // Use direct escrow contract for withdrawal (like in arb-sep.js)
             const dstEscrowContract = new ethers.Contract(dstEscrowAddress, ESCROW_ABI, dstRelayer)
@@ -986,7 +1031,7 @@ async function executeSwapAsync(swapData) {
                 
                 // Verify withdrawal
                 const dstEscrowBalanceAfter = await dstToken.balanceOf(dstEscrowAddress)
-                console.log(`   Destination escrow balance after withdrawal: ${ethers.formatUnits(dstEscrowBalanceAfter, 6)} USDC`)
+                console.log(`   Destination escrow balance after withdrawal: ${ethers.formatEther(dstEscrowBalanceAfter)} WETH`)
                 
                 if (dstEscrowBalanceAfter < dstEscrowBalanceBefore) {
                     console.log('   ✅ Relayer successfully withdrew tokens from destination escrow')
@@ -1009,15 +1054,22 @@ async function executeSwapAsync(swapData) {
             throw new Error(`Failed to withdraw from destination escrow: ${error.message}`)
         }
 
-        // Step 10: Transfer destination tokens to user
-        console.log('   Relayer: Transferring destination tokens to user...')
+        // Step 11: Transfer destination WETH to user (with optional unwrapping)
+        console.log('   Relayer: Transferring destination WETH to user...')
         try {
+            // Option 1: Transfer WETH directly to user
             const transferTx = await dstToken.transfer(swapData.userAddress, swapData.amount)
             await transferTx.wait()
-            console.log('   ✅ Destination tokens transferred to user')
+            console.log('   ✅ Destination WETH transferred to user')
+            
+            // Optional: Add unwrapping logic here if user prefers ETH
+            // const unwrapTx = await dstToken.withdraw(swapData.amount)
+            // await unwrapTx.wait()
+            // Then send ETH to user...
+            
         } catch (error) {
-            console.log(`   ❌ Token transfer to user failed: ${error.message}`)
-            throw new Error(`Failed to transfer tokens to user: ${error.message}`)
+            console.log(`   ❌ WETH transfer to user failed: ${error.message}`)
+            throw new Error(`Failed to transfer WETH to user: ${error.message}`)
         }
 
         swapData.status = 'completed'
@@ -1059,8 +1111,8 @@ async function initializeServer() {
             console.log('🚀 Deploying contracts on Sepolia...')
             const srcDeployment = await deployContracts(srcProvider, srcRelayer, config.chain.source, 'Sepolia')
             
-            console.log('🚀 Deploying contracts on Arbitrum Sepolia...')
-            const dstDeployment = await deployContracts(dstProvider, dstRelayer, config.chain.destination, 'Arbitrum Sepolia')
+            console.log('🚀 Deploying contracts on Monad...')
+            const dstDeployment = await deployContracts(dstProvider, dstRelayer, config.chain.destination, 'Monad')
             
             deployedContracts = {
                 sepolia: {
@@ -1068,7 +1120,7 @@ async function initializeServer() {
                     resolver: srcDeployment.resolver,
                     lastDeployed: new Date().toISOString()
                 },
-                arbitrumSepolia: {
+                monad: {
                     escrowFactory: dstDeployment.escrowFactory,
                     resolver: dstDeployment.resolver,
                     lastDeployed: new Date().toISOString()
@@ -1082,7 +1134,7 @@ async function initializeServer() {
             
             console.log('✅ Contract deployment complete')
             console.log(`📋 Sepolia Factory: ${deployedContracts.sepolia.escrowFactory}`)
-            console.log(`📋 Arbitrum Sepolia Factory: ${deployedContracts.arbitrumSepolia.escrowFactory}`)
+            console.log(`📋 Monad Factory: ${deployedContracts.monad.escrowFactory}`)
         } catch (deploymentError) {
             console.error('❌ Contract deployment failed:', deploymentError.message)
             console.log('⚠️ Server will continue without fresh deployments')
